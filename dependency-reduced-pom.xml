@@ -13,6 +13,11 @@
         <version>3.12.1</version>
         <configuration>
           <release>${maven.compiler.release}</release>
+          <source>${maven.compiler.source}</source>
+          <target>${maven.compiler.target}</target>
+          <compilerArgs>
+            <arg>--enable-preview</arg>
+          </compilerArgs>
         </configuration>
       </plugin>
       <plugin>
@@ -50,8 +55,12 @@
       <url>https://repo.maven.apache.org/maven2</url>
     </repository>
     <repository>
-      <id>freetts</id>
-      <url>https://maven.imagej.net/content/repositories/public/</url>
+      <id>jcenter</id>
+      <url>https://jcenter.bintray.com</url>
+    </repository>
+    <repository>
+      <id>marytts</id>
+      <url>https://github.com/marytts/marytts/releases</url>
     </repository>
   </repositories>
   <dependencies>
@@ -70,9 +79,11 @@
   </dependencies>
   <properties>
     <maven.compiler.release>23</maven.compiler.release>
-    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <javafx.version>21.0.1</javafx.version>
+    <maven.compiler.target>23</maven.compiler.target>
     <exec.mainClass>com.dictionary.DictionaryApp</exec.mainClass>
     <maven.test.skip>true</maven.test.skip>
+    <maven.compiler.source>23</maven.compiler.source>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <javafx.version>21.0.1</javafx.version>
   </properties>
 </project>

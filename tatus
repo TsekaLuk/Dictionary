@@ -1,0 +1,4 @@
+[33m3d187bc[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m Update Java version requirement to Java 23 and add download links
+[33mb63c03c[m Update README with correct JavaFX execution instructions
+[33me5a1edb[m Add project documentation and GitHub workflows
+[33m519a71f[m Initial commit: Dictionary application

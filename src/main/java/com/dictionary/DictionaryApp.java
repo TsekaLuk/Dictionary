@@ -2,6 +2,7 @@ package com.dictionary;
 
 import javafx.application.Application;
 import javafx.scene.Scene;
+import javafx.scene.Node;
 import javafx.scene.layout.*;
 import javafx.stage.Stage;
 import javafx.stage.FileChooser;
@@ -9,6 +10,7 @@ import javafx.scene.image.Image;
 import javafx.scene.control.*;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.geometry.Orientation;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 import javafx.animation.*;
@@ -28,11 +30,28 @@ import com.dictionary.model.WordBook;
 import com.dictionary.util.FileIOUtil;
 import com.dictionary.gui.AddWordDialogFX;
 import com.dictionary.gui.ModifyDeleteDialogFX;
+import com.dictionary.gui.DictionaryRepositoryPage;
 import com.dictionary.util.TTSUtil;
 import com.dictionary.util.SVGUtil;
+import com.dictionary.repository.DatabaseHelper;
+import com.dictionary.util.ResourceManager;
 
 import java.io.File;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import javafx.beans.binding.Bindings;
+import java.lang.ref.WeakReference;
+import javafx.beans.property.IntegerProperty;
+import javafx.beans.property.SimpleIntegerProperty;
+import javafx.beans.property.ObjectProperty;
+import javafx.beans.property.SimpleObjectProperty;
+import javafx.collections.FXCollections;
+import javafx.collections.ObservableList;
+import javafx.event.WeakEventHandler;
 
 public class DictionaryApp extends Application {
     private Stage primaryStage;
@@ -56,6 +75,23 @@ public class DictionaryApp extends Application {
     private ProgressIndicator progressIndicator;
     private Label loadingLabel;
 
+    // Add lazy loading fields
+    private boolean dictionaryLoaded = false;
+    private boolean uiInitialized = false;
+
+    // Add pagination fields
+    private static final int PAGE_SIZE = 50;
+    private final IntegerProperty currentPageProperty = new SimpleIntegerProperty(0);
+    private final ObjectProperty<ObservableList<Word>> currentWordListProperty = 
+        new SimpleObjectProperty<>(FXCollections.observableArrayList());
+
+    // Add UI optimization fields
+    private static final long DEBOUNCE_DELAY_MS = 300;
+    private ScheduledExecutorService uiUpdateExecutor;
+    private ScheduledFuture<?> searchTask;
+
+    private final ResourceManager resourceManager = ResourceManager.getInstance();
+
     public DictionaryApp() {
         dictionary = new Dictionary();
         wordBook = new WordBook();
@@ -65,51 +101,70 @@ public class DictionaryApp extends Application {
     public void start(Stage primaryStage) {
         this.primaryStage = primaryStage;
         
-        // Create root container
+        // Initialize UI update executor
+        uiUpdateExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            return t;
+        });
+        resourceManager.registerExecutor(uiUpdateExecutor);
+        
+        // Initialize root container first
         root = new StackPane();
-        root.setPadding(new Insets(20));
+        root.getStyleClass().add("root-pane");
         
-        // Create content pane
-        contentPane = new VBox(15);
-        contentPane.setPrefWidth(1186);
-        contentPane.setPrefHeight(667);
-        contentPane.setMinWidth(800);
-        contentPane.setMinHeight(600);
-        contentPane.getStyleClass().add("content-pane");
+        // Create scene
+        scene = new Scene(root);
+        scene.getStylesheets().add(getClass().getResource("/styles/modern-theme.css").toExternalForm());
         
+        // Initialize UI components
         initializeUI();
         createAndShowGUI();
         
-        // Initialize TTS after UI is ready
+        // Set up window
+        primaryStage.setTitle("智能英汉词典");
+        primaryStage.setMinWidth(800);
+        primaryStage.setMinHeight(600);
+        primaryStage.setScene(scene);
+        primaryStage.setMaximized(true);
+        primaryStage.show();
+        
+        // Initialize TTS in background
         initializeTTS();
         
-        // Load dictionary and favorites
-        loadData();
-        primaryStage.show();
+        // Load dictionary data in background
+        loadDictionaryIfNeeded();
+        
+        // Register main components
+        resourceManager.registerNode(root);
+        resourceManager.registerNode(contentPane);
+        resourceManager.registerNode(wordList);
     }
 
-    private void loadData() {
-        new Thread(() -> {
-            try {
-                Platform.runLater(() -> showLoading("正在加载词典..."));
-                
-                // Load dictionary
-                dictionary.loadFromFile(FileIOUtil.CSV_PATH);
-                
-                // Load favorites
-                wordBook.loadFromFile(FileIOUtil.FAVORITES_PATH);
-                
-                Platform.runLater(() -> {
-                    hideLoading();
-                    updateTableView();
-                });
-            } catch (Exception e) {
-                Platform.runLater(() -> {
-                    hideLoading();
-                    showAlert("数据加载失败: " + e.getMessage(), Alert.AlertType.ERROR);
-                });
-            }
-        }).start();
+    private void loadDictionaryIfNeeded() {
+        if (!dictionaryLoaded) {
+            new Thread(() -> {
+                try {
+                    Platform.runLater(() -> showLoading("正在加载词典..."));
+                    
+                    // Load dictionary in background
+                    dictionary.loadFromFile(FileIOUtil.CSV_PATH);
+                    wordBook.loadFromFile(FileIOUtil.FAVORITES_PATH);
+                    
+                    dictionaryLoaded = true;
+                    
+                    Platform.runLater(() -> {
+                        hideLoading();
+                        updateTableView();
+                    });
+                } catch (Exception e) {
+                    Platform.runLater(() -> {
+                        hideLoading();
+                        showAlert("数据加载失败: " + e.getMessage(), Alert.AlertType.ERROR);
+                    });
+                }
+            }).start();
+        }
     }
 
     private void initializeUI() {
@@ -161,30 +216,25 @@ public class DictionaryApp extends Application {
             var lightStream = getClass().getResourceAsStream("/bg.png");
             var darkStream = getClass().getResourceAsStream("/bg-dark.png");
             
-            if (lightStream == null) {
-                System.err.println("Failed to load /bg.png - resource stream is null");
-                return;
-            }
-            if (darkStream == null) {
-                System.err.println("Failed to load /bg-dark.png - resource stream is null");
+            if (lightStream == null || darkStream == null) {
+                System.err.println("Failed to load background images - resource stream is null");
                 return;
             }
             
-            System.out.println("Resource streams obtained successfully");
             Image lightImage = new Image(lightStream);
             Image darkImage = new Image(darkStream);
             
-            if (lightImage.isError()) {
-                System.err.println("Error loading light image: " + lightImage.getException());
-                return;
-            }
-            if (darkImage.isError()) {
-                System.err.println("Error loading dark image: " + darkImage.getException());
+            if (lightImage.isError() || darkImage.isError()) {
+                System.err.println("Error loading background images");
                 return;
             }
             
-            System.out.println("Images loaded successfully");
-            new BackgroundImage(
+            // Register images for cleanup
+            resourceManager.registerImage(lightImage);
+            resourceManager.registerImage(darkImage);
+            
+            // Create background images
+            BackgroundImage lightBg = new BackgroundImage(
                 lightImage,
                 BackgroundRepeat.NO_REPEAT,
                 BackgroundRepeat.NO_REPEAT,
@@ -192,13 +242,17 @@ public class DictionaryApp extends Application {
                 new BackgroundSize(100, 100, true, true, false, false)
             );
             
-            new BackgroundImage(
+            BackgroundImage darkBg = new BackgroundImage(
                 darkImage,
                 BackgroundRepeat.NO_REPEAT,
                 BackgroundRepeat.NO_REPEAT,
                 BackgroundPosition.CENTER,
                 new BackgroundSize(100, 100, true, true, false, false)
             );
+            
+            // Store backgrounds
+            resourceManager.registerResource("lightBackground", lightBg);
+            resourceManager.registerResource("darkBackground", darkBg);
             
             System.out.println("Background images initialized successfully");
         } catch (Exception e) {
@@ -209,58 +263,76 @@ public class DictionaryApp extends Application {
     private void createAndShowGUI() {
         // 创建搜索区域
         VBox searchArea = createSearchArea();
-        VBox.setVgrow(searchArea, Priority.NEVER);
         
         // 创建结果区域
         VBox resultArea = createResultArea();
-        VBox.setVgrow(resultArea, Priority.ALWAYS);
         
         // 创建底部工具栏
         HBox bottomBar = createBottomBar();
-        VBox.setVgrow(bottomBar, Priority.NEVER);
+        bottomBar.getStyleClass().add("bottom-bar");
         
-        // 组装界面
-        contentPane.getChildren().addAll(searchArea, resultArea, bottomBar);
-        root.getChildren().add(contentPane);
+        // 创建词典仓库页面
+        DictionaryRepositoryPage repositoryPage = new DictionaryRepositoryPage(primaryStage);
+        repositoryPage.setVisible(false);
+        repositoryPage.setOnBackAction(() -> toggleRepositoryPage());
+        repositoryPage.setDictionary(dictionary);
         
-        // 创建场景
-        scene = new Scene(root);
-        scene.getStylesheets().add(getClass().getResource("/styles/modern-theme.css").toExternalForm());
+        // 创建主要内容区域
+        VBox mainContent = new VBox(10);
+        mainContent.setPadding(new Insets(10));
+        mainContent.getChildren().addAll(searchArea, resultArea);
+        VBox.setVgrow(mainContent, Priority.ALWAYS);
+        
+        // 创建主布局容器
+        BorderPane mainLayout = new BorderPane();
+        mainLayout.setCenter(mainContent);
+        mainLayout.setBottom(bottomBar);
+        mainLayout.getStyleClass().add("main-layout");
+        
+        // 使用已存在的root
+        root.getChildren().addAll(mainLayout, repositoryPage);
+        
+        // 设置背景
+        setupBackground();
         
         // 设置主题监听
         setupThemeListener();
-        
-        // 设置窗口
-        primaryStage.setTitle("智能英汉词典");
-        primaryStage.setMinWidth(1000);
-        primaryStage.setMinHeight(700);
-        primaryStage.setScene(scene);
-        
-        // 添加窗口显示动画
-        contentPane.setOpacity(0);
-        FadeTransition fadeIn = new FadeTransition(Duration.millis(1000), contentPane);
-        fadeIn.setFromValue(0);
-        fadeIn.setToValue(1);
-        fadeIn.play();
+    }
+
+    private void setupBackground() {
+        root.setStyle(
+            "-fx-background-image: url('/bg.png'); " +
+            "-fx-background-size: cover; " +
+            "-fx-background-position: center; " +
+            "-fx-background-repeat: no-repeat; " +
+            "-fx-background-color: transparent;"
+        );
     }
 
     private VBox createSearchArea() {
-        VBox searchArea = new VBox(10);
-        searchArea.setPrefWidth(Region.USE_COMPUTED_SIZE);
-        searchArea.setMinHeight(100);
+        VBox searchArea = new VBox();
+        searchArea.setSpacing(10);
         searchArea.getStyleClass().add("search-area");
+        searchArea.setPadding(new Insets(10));
+        searchArea.setMinHeight(200);  // 设置最小高度
+        searchArea.setPrefHeight(200);  // 设置首选高度
+        searchArea.setMaxHeight(200);  // 设置最大高度
+        VBox.setVgrow(searchArea, Priority.NEVER);  // 防止被拉伸
         
         // 创建搜索框和按钮区域
-        HBox searchBox = new HBox(10);
+        HBox searchBox = new HBox();
+        searchBox.setSpacing(10);  // 增加间距
         searchBox.setAlignment(Pos.CENTER_LEFT);
-        searchBox.setPrefWidth(Region.USE_COMPUTED_SIZE);
+        searchBox.setPadding(new Insets(5));  // 添加内边距
+        HBox.setHgrow(searchBox, Priority.ALWAYS);
         
         Label searchLabel = new Label("请输入词汇:");
         searchLabel.setFont(Font.font("Microsoft YaHei", 14));
+        searchLabel.setMinWidth(Region.USE_PREF_SIZE);
         
         searchField = new TextField();
         searchField.setPromptText("输入要查询的单词");
-        searchField.setPrefWidth(300);
+        searchField.setPrefWidth(300);  // 设置首选宽度
         HBox.setHgrow(searchField, Priority.ALWAYS);
         
         // 创建单选按钮组
@@ -271,23 +343,47 @@ public class DictionaryApp extends Application {
         chineseToEnglishBtn.setToggleGroup(directionGroup);
         englishToChineseBtn.setSelected(true);
         
-        // 创建按钮区域
-        HBox buttonBox = new HBox(8);
-        buttonBox.setAlignment(Pos.CENTER_LEFT);
+        HBox directionBox = new HBox();
+        directionBox.setSpacing(20);  // 增加间距
+        directionBox.setAlignment(Pos.CENTER_LEFT);
+        directionBox.setPadding(new Insets(5));  // 添加内边距
+        directionBox.getChildren().addAll(englishToChineseBtn, chineseToEnglishBtn);
         
+        // 创建按钮区域
+        HBox buttonBox = new HBox();
+        buttonBox.setSpacing(10);  // 增加间距
+        buttonBox.setAlignment(Pos.CENTER_LEFT);
+        buttonBox.setPadding(new Insets(5));  // 添加内边距
+        
+        // 创建按钮组
+        HBox searchGroup = new HBox();
+        searchGroup.setSpacing(10);  // 增加间距
         Button searchBtn = new Button("查询");
         Button clearBtn = new Button("清除");
+        searchGroup.getChildren().addAll(searchBtn, clearBtn);
+        
+        Separator separator1 = new Separator(Orientation.VERTICAL);
+        separator1.setPadding(new Insets(0, 10, 0, 10));  // 添加水平内边距
+        
+        HBox editGroup = new HBox();
+        editGroup.setSpacing(10);  // 增加间距
         Button addBtn = new Button("添加");
         Button modifyBtn = new Button("修改与删除");
+        editGroup.getChildren().addAll(addBtn, modifyBtn);
+        
+        Separator separator2 = new Separator(Orientation.VERTICAL);
+        separator2.setPadding(new Insets(0, 10, 0, 10));  // 添加水平内边距
+        
+        HBox utilGroup = new HBox();
+        utilGroup.setSpacing(10);  // 增加间距
         Button importBtn = new Button("导入词典");
         showFavoritesBtn = new Button("收藏夹");
-        
-        Separator separator = new Separator();
-        separator.setOrientation(javafx.geometry.Orientation.VERTICAL);
+        utilGroup.getChildren().addAll(importBtn, showFavoritesBtn);
         
         buttonBox.getChildren().addAll(
-            searchBtn, clearBtn, separator,
-            addBtn, modifyBtn, importBtn, showFavoritesBtn
+            searchGroup, separator1,
+            editGroup, separator2,
+            utilGroup
         );
         
         // 添加事件处理
@@ -322,51 +418,104 @@ public class DictionaryApp extends Application {
         searchField.addEventHandler(KeyEvent.KEY_PRESSED, e -> {
             if (e.isControlDown()) {
                 switch (e.getCode()) {
-                                    case C -> searchField.copy();
-                                    case V -> searchField.paste();
-                                    case X -> searchField.cut();
-                                    default -> throw new IllegalArgumentException("Unexpected value: " + e.getCode());
+                    case C -> searchField.copy();
+                    case V -> searchField.paste();
+                    case X -> searchField.cut();
+                    default -> {}
                 }
+            }
+        });
+        
+        // Add debounced search
+        searchField.textProperty().addListener((obs, oldText, newText) -> {
+            if (searchTask != null) {
+                searchTask.cancel(false);
+            }
+            
+            if (!newText.trim().isEmpty()) {
+                searchTask = uiUpdateExecutor.schedule(
+                    () -> Platform.runLater(() -> searchWord()),
+                    DEBOUNCE_DELAY_MS,
+                    TimeUnit.MILLISECONDS
+                );
             }
         });
         
         // 组装搜索区域
         searchBox.getChildren().addAll(searchLabel, searchField);
-        HBox directionBox = new HBox(20);
-        directionBox.getChildren().addAll(englishToChineseBtn, chineseToEnglishBtn);
-        
         searchArea.getChildren().addAll(searchBox, directionBox, buttonBox);
+        
         return searchArea;
     }
 
     private VBox createResultArea() {
-        VBox resultArea = new VBox(10);
+        VBox resultArea = new VBox();
+        resultArea.setSpacing(10);
         resultArea.getStyleClass().add("result-area");
+        resultArea.setFillWidth(true);
+        VBox.setVgrow(resultArea, Priority.ALWAYS);
         
-        // 创建现代列表视图
+        // Create modern list view with virtualization
         wordList = new ListView<>();
-        wordList.setCellFactory(listView -> new WordListCell());
-        wordList.setPlaceholder(new Label("暂无数据"));
+        wordList.setStyle("-fx-fixed-cell-size: 50;"); // Enable virtualization
         
-        // 添加列表右键菜单
-        ContextMenu listMenu = new ContextMenu();
-        MenuItem copyMenuItem = new MenuItem("复制选中内容");
-        copyMenuItem.setOnAction(e -> copySelectedContent());
-        listMenu.getItems().add(copyMenuItem);
-        
-        wordList.setContextMenu(listMenu);
-        
-        // 添加快捷键
-        wordList.addEventHandler(KeyEvent.KEY_PRESSED, e -> {
-            if (e.isControlDown() && e.getCode() == KeyCode.C) {
-                copySelectedContent();
-            }
+        // Use custom cell factory with recycling
+        wordList.setCellFactory(listView -> {
+            WordListCell cell = new WordListCell();
+            cell.setPrefHeight(Region.USE_COMPUTED_SIZE);
+            return cell;
         });
         
-        resultArea.getChildren().add(wordList);
-        VBox.setVgrow(wordList, Priority.ALWAYS);
+        // Enable smooth scrolling
+        ScrollPane scrollPane = new ScrollPane(wordList);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setFitToHeight(true);
+        scrollPane.setPannable(true);
+        VBox.setVgrow(scrollPane, Priority.ALWAYS);
         
+        wordList.setPlaceholder(new Label("暂无数据"));
+        wordList.setFocusTraversable(false);
+        
+        // Add pagination controls with optimized updates
+        HBox paginationBox = createPaginationControls();
+        
+        resultArea.getChildren().addAll(scrollPane, paginationBox);
         return resultArea;
+    }
+
+    private HBox createPaginationControls() {
+        HBox paginationBox = new HBox(10);
+        paginationBox.setAlignment(Pos.CENTER);
+        
+        Button prevButton = new Button("上一页");
+        Button nextButton = new Button("下一页");
+        Label pageLabel = new Label();
+        
+        // Add button states
+        prevButton.disableProperty().bind(
+            Bindings.createBooleanBinding(
+                () -> currentPageProperty.get() == 0,
+                currentPageProperty
+            )
+        );
+        
+        nextButton.disableProperty().bind(
+            Bindings.createBooleanBinding(
+                () -> {
+                    int totalPages = (int) Math.ceil((double) currentWordListProperty.get().size() / PAGE_SIZE);
+                    return currentPageProperty.get() >= totalPages - 1;
+                },
+                currentPageProperty,
+                currentWordListProperty
+            )
+        );
+        
+        // Use event filters for better performance
+        prevButton.addEventFilter(MouseEvent.MOUSE_CLICKED, e -> showPreviousPage());
+        nextButton.addEventFilter(MouseEvent.MOUSE_CLICKED, e -> showNextPage());
+        
+        paginationBox.getChildren().addAll(prevButton, pageLabel, nextButton);
+        return paginationBox;
     }
 
     private class WordListCell extends ListCell<Word> {
@@ -375,68 +524,98 @@ public class DictionaryApp extends Application {
         private Label translationLabel;
         private Button pronounceButton;
         private Button favoriteButton;
-        private Region spacer;
+        private WeakReference<Word> wordRef;
         
         public WordListCell() {
             super();
             
-            content = new HBox(20);
+            content = new HBox();
+            content.setSpacing(5);
             content.setAlignment(Pos.CENTER_LEFT);
-            content.setPadding(new Insets(10, 15, 10, 15));
+            content.setPadding(new Insets(5));
             content.getStyleClass().add("word-list-item");
+            HBox.setHgrow(content, Priority.ALWAYS);
             
             wordLabel = new Label();
             wordLabel.getStyleClass().add("word-label");
-            wordLabel.setMinWidth(150);
-            wordLabel.setPrefWidth(200);
+            wordLabel.setMinWidth(100);
+            wordLabel.setPrefWidth(150);
+            wordLabel.setMaxWidth(200);
+            HBox.setHgrow(wordLabel, Priority.NEVER);
             
             translationLabel = new Label();
             translationLabel.getStyleClass().add("translation-label");
-            translationLabel.setMinWidth(300);
-            translationLabel.setPrefWidth(400);
             translationLabel.setWrapText(true);
+            HBox.setHgrow(translationLabel, Priority.ALWAYS);
             
-            spacer = new Region();
-            HBox.setHgrow(spacer, Priority.ALWAYS);
+            // 创建按钮容器
+            HBox buttonContainer = new HBox();
+            buttonContainer.setSpacing(5);
+            buttonContainer.setAlignment(Pos.CENTER_RIGHT);
+            buttonContainer.setMinWidth(70);
+            buttonContainer.setPrefWidth(70);
+            buttonContainer.setMaxWidth(70);
+            HBox.setHgrow(buttonContainer, Priority.NEVER);
             
             // 创建发音按钮
             pronounceButton = new Button();
             pronounceButton.getStyleClass().addAll("icon-button", "pronounce-button");
-            pronounceButton.setGraphic(createSVGImageView("/icons/volume.svg", 18, 18));
+            pronounceButton.setGraphic(createSVGImageView("/icons/volume.svg", 16, 16));
             
             // 创建收藏按钮
             favoriteButton = new Button();
             favoriteButton.getStyleClass().addAll("icon-button", "favorite-button");
             updateFavoriteButton(null);
             
-            content.getChildren().addAll(wordLabel, translationLabel, spacer, pronounceButton, favoriteButton);
+            buttonContainer.getChildren().addAll(pronounceButton, favoriteButton);
+            
+            content.getChildren().addAll(wordLabel, translationLabel, buttonContainer);
             
             // 添加悬停效果
             setOnMouseEntered(e -> content.getStyleClass().add("word-list-item-hover"));
             setOnMouseExited(e -> content.getStyleClass().remove("word-list-item-hover"));
+            
+            // Register cell components
+            resourceManager.registerNode(content);
+            resourceManager.registerNode(wordLabel);
+            resourceManager.registerNode(translationLabel);
+            resourceManager.registerNode(pronounceButton);
+            resourceManager.registerNode(favoriteButton);
         }
         
         @Override
         protected void updateItem(Word word, boolean empty) {
+            Word oldWord = wordRef != null ? wordRef.get() : null;
+            if (oldWord != null) {
+                // Clean up old references
+                cleanupOldReferences(oldWord);
+            }
+            
             super.updateItem(word, empty);
             
             if (empty || word == null) {
                 setGraphic(null);
+                wordRef = null;
             } else {
+                wordRef = new WeakReference<>(word);
                 wordLabel.setText(word.getWord());
                 translationLabel.setText(word.getTranslation());
                 
-                pronounceButton.setOnAction(e -> pronounceWord(word, pronounceButton));
-                
-                // 更新收藏按钮状态
-                updateFavoriteButton(word);
-                favoriteButton.setOnAction(e -> {
+                // Use weak event handlers
+                pronounceButton.setOnAction(new WeakEventHandler<>(e -> pronounceWord(word, pronounceButton)));
+                favoriteButton.setOnAction(new WeakEventHandler<>(e -> {
                     toggleFavorite(word);
                     updateFavoriteButton(word);
-                });
+                }));
                 
                 setGraphic(content);
             }
+        }
+        
+        private void cleanupOldReferences(Word oldWord) {
+            // Remove event handlers
+            pronounceButton.setOnAction(null);
+            favoriteButton.setOnAction(null);
         }
 
         private void updateFavoriteButton(Word word) {
@@ -452,14 +631,32 @@ public class DictionaryApp extends Application {
     }
 
     private HBox createBottomBar() {
-        HBox bottomBar = new HBox(10);
+        HBox bottomBar = new HBox();
+        bottomBar.setSpacing(10);  // 增加按钮间距
         bottomBar.setAlignment(Pos.CENTER_RIGHT);
+        bottomBar.setPadding(new Insets(10));
+        bottomBar.setStyle("-fx-background-color: transparent;");
+        
+        Button repositoryButton = new Button("词典仓库");
+        repositoryButton.setMinWidth(100);
+        repositoryButton.setPrefWidth(100);
+        repositoryButton.setMaxWidth(100);
+        repositoryButton.setMinHeight(30);
+        repositoryButton.setPrefHeight(30);
+        repositoryButton.setMaxHeight(30);
+        repositoryButton.setOnAction(e -> toggleRepositoryPage());
         
         Button themeToggle = new Button("切换主题");
+        themeToggle.setMinWidth(100);
+        themeToggle.setPrefWidth(100);
+        themeToggle.setMaxWidth(100);
+        themeToggle.setMinHeight(30);
+        themeToggle.setPrefHeight(30);
+        themeToggle.setMaxHeight(30);
         themeToggle.getStyleClass().add("theme-toggle-button");
         themeToggle.setOnAction(e -> toggleTheme());
         
-        bottomBar.getChildren().add(themeToggle);
+        bottomBar.getChildren().addAll(repositoryButton, themeToggle);
         return bottomBar;
     }
 
@@ -471,16 +668,22 @@ public class DictionaryApp extends Application {
             
             fadeOut.setOnFinished(e -> {
                 if (newVal) {
-                    root.setStyle("-fx-background-image: url('/bg-dark.png'); " +
-                                "-fx-background-position: center center; " +
-                                "-fx-background-repeat: no-repeat; " +
-                                "-fx-background-size: cover;");
+                    root.setStyle(
+                        "-fx-background-image: url('/bg-dark.png'); " +
+                        "-fx-background-size: cover; " +
+                        "-fx-background-position: center; " +
+                        "-fx-background-repeat: no-repeat; " +
+                        "-fx-background-color: transparent;"
+                    );
                     scene.getRoot().getStyleClass().add("dark");
                 } else {
-                    root.setStyle("-fx-background-image: url('/bg.png'); " +
-                                "-fx-background-position: center center; " +
-                                "-fx-background-repeat: no-repeat; " +
-                                "-fx-background-size: cover;");
+                    root.setStyle(
+                        "-fx-background-image: url('/bg.png'); " +
+                        "-fx-background-size: cover; " +
+                        "-fx-background-position: center; " +
+                        "-fx-background-repeat: no-repeat; " +
+                        "-fx-background-color: transparent;"
+                    );
                     scene.getRoot().getStyleClass().remove("dark");
                 }
                 
@@ -501,10 +704,20 @@ public class DictionaryApp extends Application {
             return;
         }
 
-        List<Word> similarWords = dictionary.findSimilarWords(text, englishToChineseBtn.isSelected());
-        if (!similarWords.isEmpty()) {
-            wordList.setItems(FXCollections.observableArrayList(similarWords));
+        loadDictionaryIfNeeded();
+
+        if (!dictionaryLoaded) {
+            showAlert("词典正在加载中，请稍候...", Alert.AlertType.INFORMATION);
+            return;
+        }
+
+        currentWordListProperty.get().clear();
+        currentWordListProperty.get().addAll(dictionary.findSimilarWords(text, englishToChineseBtn.isSelected()));
+        if (!currentWordListProperty.get().isEmpty()) {
+            currentPageProperty.set(0);
+            showPage(0);
         } else {
+            currentWordListProperty.get().clear();
             wordList.setItems(FXCollections.observableArrayList());
             showAlert("未找到相似词条", Alert.AlertType.INFORMATION);
         }
@@ -624,13 +837,27 @@ public class DictionaryApp extends Application {
     @Override
     public void stop() {
         try {
+            // Use ResourceManager to clean up all resources
+            resourceManager.cleanup();
+            
+            // Additional cleanup
             TTSUtil.cleanup();
             if (wordBook != null) {
                 wordBook.saveToFile(FileIOUtil.FAVORITES_PATH);
             }
+            DatabaseHelper.getInstance().closePool();
         } catch (Exception e) {
             System.err.println("清理资源失败: " + e.getMessage());
         }
+    }
+
+    private void clearEventHandlers() {
+        if (searchField != null) searchField.setOnKeyPressed(null);
+        if (wordList != null) {
+            wordList.setOnMouseClicked(null);
+            wordList.setItems(null);
+        }
+        // Clear other event handlers...
     }
 
     public static void main(String[] args) {
@@ -639,8 +866,34 @@ public class DictionaryApp extends Application {
 
     private void updateTableView() {
         if (dictionary != null) {
-            List<Word> allWords = dictionary.getAllWords();
-            wordList.setItems(FXCollections.observableArrayList(allWords));
+            // Use batch loading for large datasets
+            new Thread(() -> {
+                List<Word> allWords = dictionary.getAllWords();
+                int totalSize = allWords.size();
+                int batchSize = 100;
+                
+                for (int i = 0; i < totalSize; i += batchSize) {
+                    final int currentIndex = i;
+                    int start = currentIndex;
+                    int end = Math.min(start + batchSize, totalSize);
+                    List<Word> batch = allWords.subList(start, end);
+                    
+                    Platform.runLater(() -> {
+                        if (currentIndex == 0) {
+                            wordList.setItems(FXCollections.observableArrayList(batch));
+                        } else {
+                            wordList.getItems().addAll(batch);
+                        }
+                    });
+                    
+                    try {
+                        Thread.sleep(10); // Small delay to prevent UI freezing
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }).start();
         }
     }
 
@@ -650,8 +903,103 @@ public class DictionaryApp extends Application {
             BufferedImage bufferedImage = new BufferedImage(
                 width, height, BufferedImage.TYPE_INT_ARGB);
             icon.paintIcon(null, bufferedImage.getGraphics(), 0, 0);
-            return new ImageView(SwingFXUtils.toFXImage(bufferedImage, null));
+            ImageView imageView = new ImageView(SwingFXUtils.toFXImage(bufferedImage, null));
+            resourceManager.registerNode(imageView);
+            return imageView;
         }
         return null;
+    }
+
+    private void toggleRepositoryPage() {
+        // 获取词典仓库页面和主布局
+        DictionaryRepositoryPage repositoryPage = null;
+        Node mainLayout = null;
+        
+        // 安全地获取组件
+        for (Node node : root.getChildren()) {
+            if (node instanceof DictionaryRepositoryPage) {
+                repositoryPage = (DictionaryRepositoryPage) node;
+            } else if (node instanceof BorderPane) {
+                mainLayout = node;
+            }
+        }
+        
+        if (repositoryPage == null || mainLayout == null) {
+            return;
+        }
+        
+        // 禁用加载动画
+        loadingOverlay.setVisible(false);
+        
+        final Node finalMainLayout = mainLayout;
+        final DictionaryRepositoryPage finalRepositoryPage = repositoryPage;
+        
+        if (repositoryPage.isVisible()) {
+            // 切换回主页面
+            FadeTransition fadeOut = new FadeTransition(Duration.millis(300), finalRepositoryPage);
+            fadeOut.setFromValue(1);
+            fadeOut.setToValue(0);
+            fadeOut.setOnFinished(e -> {
+                finalRepositoryPage.setVisible(false);
+                finalMainLayout.setVisible(true);
+                
+                FadeTransition fadeIn = new FadeTransition(Duration.millis(300), finalMainLayout);
+                fadeIn.setFromValue(0);
+                fadeIn.setToValue(1);
+                fadeIn.play();
+            });
+            fadeOut.play();
+        } else {
+            // 切换到词典仓库页面
+            FadeTransition fadeOut = new FadeTransition(Duration.millis(300), finalMainLayout);
+            fadeOut.setFromValue(1);
+            fadeOut.setToValue(0);
+            fadeOut.setOnFinished(e -> {
+                finalMainLayout.setVisible(false);
+                finalRepositoryPage.setVisible(true);
+                
+                // 更新词典仓库页面数据
+                finalRepositoryPage.updateDictionaryData();
+                
+                FadeTransition fadeIn = new FadeTransition(Duration.millis(300), finalRepositoryPage);
+                fadeIn.setFromValue(0);
+                fadeIn.setToValue(1);
+                fadeIn.play();
+            });
+            fadeOut.play();
+        }
+    }
+
+    private void showPage(int page) {
+        if (currentWordListProperty.get().isEmpty()) {
+            return;
+        }
+        
+        int start = page * PAGE_SIZE;
+        int end = Math.min(start + PAGE_SIZE, currentWordListProperty.get().size());
+        
+        if (start >= 0 && start < currentWordListProperty.get().size()) {
+            currentPageProperty.set(page);
+            List<Word> pageItems = currentWordListProperty.get().subList(start, end);
+            wordList.setItems(FXCollections.observableArrayList(pageItems));
+            updatePageLabel();
+        }
+    }
+
+    private void showNextPage() {
+        showPage(currentPageProperty.get() + 1);
+    }
+
+    private void showPreviousPage() {
+        if (currentPageProperty.get() > 0) {
+            showPage(currentPageProperty.get() - 1);
+        }
+    }
+
+    private void updatePageLabel() {
+        int totalPages = (int) Math.ceil((double) currentWordListProperty.get().size() / PAGE_SIZE);
+        HBox paginationBox = (HBox) ((VBox) wordList.getParent()).getChildren().get(1);
+        Label pageLabel = (Label) paginationBox.getChildren().get(1);
+        pageLabel.setText(String.format("第 %d/%d 页", currentPageProperty.get() + 1, totalPages));
     }
 } 
