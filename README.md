@@ -13,7 +13,7 @@ A modern, feature-rich dictionary application built with JavaFX, designed to hel
 
 ## Technology Stack
 
-- Java
+- Java 23
 - JavaFX
 - Maven
 - SQLite (for data storage)
@@ -23,7 +23,9 @@ A modern, feature-rich dictionary application built with JavaFX, designed to hel
 
 ### Prerequisites
 
-- Java 11 or higher (with JavaFX included)
+- Java 23 (with JavaFX included)
+  - Download from [Oracle JDK 23](https://www.oracle.com/java/technologies/downloads/#java23)
+  - Or use [OpenJDK 23](https://jdk.java.net/23/)
 - Maven 3.6.3 or higher
 - Git
 
