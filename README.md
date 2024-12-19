@@ -23,7 +23,7 @@ A modern, feature-rich dictionary application built with JavaFX, designed to hel
 
 ### Prerequisites
 
-- Java 11 or higher
+- Java 11 or higher (with JavaFX included)
 - Maven 3.6.3 or higher
 - Git
 
@@ -49,15 +49,19 @@ mvn clean package
 
 4. Run the application
 
-```bash
-java -jar target/Dictionary-1.0-SNAPSHOT.jar
-```
-
-Or use the provided batch file:
+For Windows users, simply use the provided batch file:
 
 ```bash
 run.bat
 ```
+
+For other operating systems or manual execution, use:
+
+```bash
+mvn javafx:run
+```
+
+Note: Direct `java -jar` execution is not supported due to JavaFX module requirements. Please use one of the methods above to run the application.
 
 ## Usage
 
@@ -80,3 +84,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Thanks to all contributors
 - Inspired by modern dictionary applications
+- Built with ❤️ using JavaFX
